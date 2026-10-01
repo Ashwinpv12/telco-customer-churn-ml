@@ -27,7 +27,7 @@ ENV PYTHONUNBUFFERED=1 \
     MODEL_DIR=/app/model
 
 # 6. Expose FastAPI port
-EXPOSE 8000
+EXPOSE 8000 10000
 
-# 7. Run the FastAPI app using uvicorn (change path if needed)
-CMD ["python", "-m", "uvicorn", "src.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run on Render's PORT, or 8000 for local Docker runs.
+CMD ["sh", "-c", "python -m uvicorn src.app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

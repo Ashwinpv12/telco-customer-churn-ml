@@ -1,7 +1,7 @@
 ## Telco Churn – End-to-End ML Project
 ### Purpose
 
-Build and ship a full machine-learning solution for predicting customer churn in a telecom setting—from data prep and modeling to an API + web UI deployed on AWS.
+Build a machine-learning solution for telecom customer churn, with repeatable data preparation and training, a FastAPI prediction API, and a Gradio web UI deployable as a public Render web service.
 
 ### Problem solved & benefits
 
@@ -17,18 +17,14 @@ Build and ship a full machine-learning solution for predicting customer churn in
 - Inference service: FastAPI app exposing /predict (POST) and a root health check /.
 - Web UI: Gradio interface mounted at /ui for quick, shareable manual testing.
 - Containerization: Docker image with uvicorn entrypoint (src.app.main:app) listening on port 8000.
-- CI/CD: GitHub Actions builds the image and pushes to Docker Hub; optionally triggers an ECS service update.
-- Orchestration: AWS ECS Fargate runs the container (serverless).
-- Networking: Application Load Balancer (ALB) on HTTP:80 forwarding to a Target Group (IP targets on HTTP:8000).
-- Security: Security groups scoped to allow ALB inbound 80 from the internet, and task inbound 8000 from the ALB SG.
-- Observability: CloudWatch Logs for container stdout/stderr and ECS service events.
+- CI/CD: GitHub Actions runs tests and a container smoke test; Render is configured to deploy after checks pass.
+- Hosting: Render Docker web service with managed public HTTPS, configured via `render.yaml`.
 
 ### Deployment flow (high-level)
 
-- Push to main → GitHub Actions builds the Docker image and pushes it to Docker Hub.
-- ECS service is updated (manually or via the workflow) to force a new deployment.
-- ALB health checks hit / on port 8000; once healthy, traffic is routed to the new task.
-- Users call POST /predict or open the Gradio UI at /ui via the ALB DNS.
+- Push to main → GitHub Actions runs the automated tests and container smoke test.
+- After checks pass, Render builds the Dockerfile and deploys the web service.
+- Render checks `/` for health; users open `/ui` for Gradio or call `POST /predict` for predictions.
 
 ### Selecting and packaging the serving model
 
@@ -42,34 +38,16 @@ python scripts/package_model.py --run-id <finished-mlflow-run-id>
 docker build -t telco-churn .
 ```
 
-### Roadblocks & how we solved them
+### Deploy the live app on Render
 
-Unhealthy targets behind ALB
+This repository includes a Render Blueprint in `render.yaml`. After the latest project commit is pushed to GitHub, connect the repository to Render and create a Blueprint from that file. Render will build the Docker image and deploy the FastAPI service. The interactive Gradio page is at `/ui`; the prediction API is `POST /predict`, and `/` is the health check. The service binds to Render's `PORT` setting (10000 in the Blueprint, 8000 for local Docker runs).
 
-- Cause: App didn’t respond at the health-check path; listener/target port mismatches.
-- Fixes: Added GET / health endpoint; confirmed ALB listener on 80 forwards to TG on 8000; TG health check path set to /.
+The Blueprint uses Render's free web-service plan where available; free services may sleep while idle and take time to wake. For a continuously available demo or heavier traffic, select a paid plan. The app itself does not require application secrets.
 
-Module import error in container (ModuleNotFoundError: serving)
+The GitHub repository must contain the deployment commit before Render can build it. If you don't have write access, push the changes to a fork and connect that repository to Render.
 
-- Cause: Python path in the image didn’t include src/.
-- Fixes: Set PYTHONPATH=/app/src in the Dockerfile; corrected uvicorn app path to src.app.main:app.
-
-ALB DNS timing out
-
-- Cause: Security group rules not aligned with traffic flow.
-- Fixes: ALB SG allows inbound 80 from 0.0.0.0/0; task SG allows inbound 8000 from the ALB SG; outbound open.
-
-ECS redeploy not picking up the new image
-
-- Cause: Service still running previous task definition.
-- Fixes: Force new deployment (CLI or console) after pushing the new image; optional step added to CI.
-
-Gradio UI error (“No runs found in experiment”)
-
-- Cause: Inference/UI expected an MLflow-logged model but couldn’t resolve a run.
-- Fixes: Standardized MLflow experiment name and model logging in training; inference loads the logged model consistently (and a local path for dev).
-
-Local testing vs. production model selection
+### Deployment notes
 
 - The API loads the exact bundle in `src/serving/model/production` by default, or the directory selected by `MODEL_DIR`.
-- Package the model, feature schema, preprocessing mappings, and threshold together from one finished MLflow run; do not select a model by filesystem timestamp.
+- The Docker container honors Render's `PORT`; local runs default to port 8000.
+- The model bundle metadata targets Python 3.12, while the current Docker base is Python 3.11. The container build/smoke workflow must pass before the public service is considered ready.

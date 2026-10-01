@@ -1,4 +1,4 @@
-name: Test and Publish Container
+name: Test and Smoke-test Container
 
 on:
   push:
@@ -26,7 +26,7 @@ jobs:
       - name: Run automated tests
         run: python -m pytest tests -q
 
-  build-smoke-and-push:
+  build-and-smoke-test:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
@@ -43,11 +43,11 @@ jobs:
           context: .
           file: ./dockerfile
           load: true
-          tags: anasriad8/telco-fastapi:ci
+          tags: telco-customer-churn:ci
 
       - name: Smoke-test container health and prediction
         run: |
-          docker run --detach --name telco-churn-smoke -p 8000:8000 anasriad8/telco-fastapi:ci
+          docker run --detach --name telco-churn-smoke -p 8000:8000 telco-customer-churn:ci
           curl --retry 20 --retry-delay 2 --retry-connrefused --fail --silent http://127.0.0.1:8000/
           response="$(curl --fail --silent --show-error -X POST http://127.0.0.1:8000/predict \
             -H 'Content-Type: application/json' \
@@ -58,12 +58,4 @@ jobs:
       - name: Remove smoke-test container
         if: always()
         run: docker rm -f telco-churn-smoke || true
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Push verified image
-        run: docker push anasriad8/telco-fastapi:ci && docker tag anasriad8/telco-fastapi:ci anasriad8/telco-fastapi:latest && docker push anasriad8/telco-fastapi:latest
+# Render deploys from the repository after the main-branch checks pass.

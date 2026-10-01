@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: telco-customer-churn
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: MODEL_DIR
+        value: /app/model
+      - key: PYTHONUNBUFFERED
+        value: "1"

@@ -83,13 +83,12 @@ Critical pattern: Training and serving must use identical feature transformation
 - **Base Image**: `python:3.11-slim`
 - **Key Setting**: `PYTHONPATH=/app/src` for proper module imports
 - **Model Artifacts**: Specific MLflow run copied to `/app/model` during build
-- **Serving**: uvicorn with FastAPI app on port 8000
+- **Serving**: uvicorn with FastAPI app on Render's `PORT` (default 8000 locally)
 
 ### CI/CD Pipeline
 - **Trigger**: Pull requests and pushes to main
-- **Actions**: Run pytest; on main, build and smoke-test Docker image before pushing to Docker Hub
-- **Requirements**: `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets
-- **Deployment**: Manual ECS service update (AWS Fargate + ALB)
+- **Actions**: Run pytest; on main, build and smoke-test the Docker image
+- **Deployment**: Render Blueprint in `render.yaml`, configured to deploy after checks pass
 
 ## Key Implementation Details
 
