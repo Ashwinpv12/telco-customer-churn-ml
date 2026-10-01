@@ -15,20 +15,16 @@ RUN pip install --upgrade pip \
 # 5. Copy the entire project into the image
 COPY . .
 
-# Explicitly copy model (in case .dockerignore excluded mlruns)
-# NOTE: destination changed to /app/src/serving/model to match inference.py's path
-COPY src/serving/model /app/src/serving/model
-
-# Copy MLflow run (artifacts + metadata) to the flat /app/model convenience path
-COPY src/serving/model/3b1a41221fc44548aed629fa42b762e0/artifacts/model /app/model
-COPY src/serving/model/3b1a41221fc44548aed629fa42b762e0/artifacts/feature_columns.txt /app/model/feature_columns.txt
-COPY src/serving/model/3b1a41221fc44548aed629fa42b762e0/artifacts/preprocessing.pkl /app/model/preprocessing.pkl
+# Copy one explicitly packaged MLflow run with its matching preprocessing schema.
+# Create this directory with scripts/package_model.py before building the image.
+COPY src/serving/model/production /app/model
 
 # make "serving" and "app" importable without the "src." prefix
 # ensures logs are shown in real-time (no buffering).
 # lets you import modules using from app... instead of from src.app....
-ENV PYTHONUNBUFFERED=1 \ 
-    PYTHONPATH=/app/src
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    MODEL_DIR=/app/model
 
 # 6. Expose FastAPI port
 EXPOSE 8000

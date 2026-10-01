@@ -30,6 +30,18 @@ Build and ship a full machine-learning solution for predicting customer churn in
 - ALB health checks hit / on port 8000; once healthy, traffic is routed to the new task.
 - Users call POST /predict or open the Gradio UI at /ui via the ALB DNS.
 
+### Selecting and packaging the serving model
+
+The serving app loads exactly one bundle from `MODEL_DIR`; it no longer guesses a model based on filesystem timestamps. First run the training pipeline, then choose the resulting finished MLflow run ID and package that run before building the Docker image. The package command checks that the run passed data validation and that its model, feature list, fitted preprocessing schema, and classification threshold are present and consistent. Serving applies that run's threshold to its predicted churn probability.
+
+The default bundle destination is `src/serving/model/production`, which is included in the repository and copied by the Dockerfile to `/app/model`. Commit the generated bundle when promoting a model so CI builds use the same version. Set `MODEL_DIR` to another complete bundle directory for local or alternate deployments. Do not copy a model from one run and preprocessing files from another.
+
+```powershell
+python scripts/run_pipeline.py --input data/raw/Telco-Customer-Churn.csv --target Churn
+python scripts/package_model.py --run-id <finished-mlflow-run-id>
+docker build -t telco-churn .
+```
+
 ### Roadblocks & how we solved them
 
 Unhealthy targets behind ALB
@@ -57,7 +69,7 @@ Gradio UI error (“No runs found in experiment”)
 - Cause: Inference/UI expected an MLflow-logged model but couldn’t resolve a run.
 - Fixes: Standardized MLflow experiment name and model logging in training; inference loads the logged model consistently (and a local path for dev).
 
-Local testing vs. prod paths
+Local testing vs. production model selection
 
-- Cause: MLflow artifact URIs differ locally vs. in container.
-- Fixes: For local dev, load via direct ./mlruns/.../artifacts/model; in prod, container loads the packaged model path used at build time.
+- The API loads the exact bundle in `src/serving/model/production` by default, or the directory selected by `MODEL_DIR`.
+- Package the model, feature schema, preprocessing mappings, and threshold together from one finished MLflow run; do not select a model by filesystem timestamp.

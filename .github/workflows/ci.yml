@@ -1,19 +1,63 @@
-name: Build and Push to Docker Hub
+name: Test and Publish Container
 
 on:
   push:
-    branches: [main]  # Only trigger on main branch pushes
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
-  build-and-push:
+  test:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx # modern Docker builder that supports multi-platform builds
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run automated tests
+        run: python -m pytest tests -q
+
+  build-smoke-and-push:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Build image locally
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./dockerfile
+          load: true
+          tags: anasriad8/telco-fastapi:ci
+
+      - name: Smoke-test container health and prediction
+        run: |
+          docker run --detach --name telco-churn-smoke -p 8000:8000 anasriad8/telco-fastapi:ci
+          curl --retry 20 --retry-delay 2 --retry-connrefused --fail --silent http://127.0.0.1:8000/
+          response="$(curl --fail --silent --show-error -X POST http://127.0.0.1:8000/predict \
+            -H 'Content-Type: application/json' \
+            -d '{"gender":"Male","SeniorCitizen":0,"Partner":"Yes","Dependents":"No","tenure":5,"PhoneService":"Yes","MultipleLines":"No","InternetService":"Fiber optic","OnlineSecurity":"No","OnlineBackup":"Yes","DeviceProtection":"No","TechSupport":"No","StreamingTV":"Yes","StreamingMovies":"Yes","Contract":"Month-to-month","PaperlessBilling":"Yes","PaymentMethod":"Electronic check","MonthlyCharges":70.35,"TotalCharges":350.75}')"
+          echo "$response"
+          echo "$response" | grep -q '"prediction":'
+
+      - name: Remove smoke-test container
+        if: always()
+        run: docker rm -f telco-churn-smoke || true
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -21,10 +65,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./dockerfile  # change if your Dockerfile has a different name or path
-          push: true
-          tags: anasriad8/telco-fastapi:latest
+      - name: Push verified image
+        run: docker push anasriad8/telco-fastapi:ci && docker tag anasriad8/telco-fastapi:ci anasriad8/telco-fastapi:latest && docker push anasriad8/telco-fastapi:latest

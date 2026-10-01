@@ -13,8 +13,8 @@ Key Responsibilities:
 4. Convert model predictions to user-friendly output
 
 CRITICAL PATTERN: Training/Serving Consistency
-- Uses fixed BINARY_MAP for deterministic binary encoding
-- Applies same one-hot encoding with drop_first=True
+- Uses category and binary mappings fitted during training
+- Applies one-hot encoding against the saved category schema
 - Maintains exact feature column order from training
 - Handles missing/new categorical values gracefully
 
@@ -24,64 +24,58 @@ Production Deployment:
 - Optimized for single-row inference (real-time serving)
 """
 
+import json
+import math
 import os
+
+import joblib
+import mlflow.sklearn
 import pandas as pd
-import mlflow
+from src.features.build_features import transform_features
+from src.serving.decision import churn_class_from_probability
 
-# === MODEL LOADING CONFIGURATION ===
-# IMPORTANT: This path is set during Docker container build
-# In development: uses local MLflow artifacts
-# In production: uses model copied to container at build time
-MODEL_DIR = "/app/model"
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+MODEL_DIR = os.path.abspath(
+    os.getenv("MODEL_DIR", os.path.join(project_root, "src", "serving", "model", "production"))
+)
+if not os.path.isdir(MODEL_DIR):
+    raise FileNotFoundError(
+        f"Serving model bundle not found at {MODEL_DIR}. "
+        "Package a specific MLflow run with scripts/package_model.py first."
+    )
 
+feature_file = os.path.join(MODEL_DIR, "feature_columns.txt")
+preprocessing_file = os.path.join(MODEL_DIR, "preprocessing.pkl")
+manifest_file = os.path.join(MODEL_DIR, "bundle.json")
+if not os.path.isfile(os.path.join(MODEL_DIR, "MLmodel")):
+    raise FileNotFoundError(f"MLflow model metadata is missing from bundle: {MODEL_DIR}")
+if not all(os.path.isfile(path) for path in (feature_file, preprocessing_file, manifest_file)):
+    raise FileNotFoundError(
+        f"Bundle must contain MLmodel, feature_columns.txt, preprocessing.pkl, and bundle.json: {MODEL_DIR}"
+    )
+
+with open(feature_file, encoding="utf-8") as f:
+    FEATURE_COLS = [line.strip() for line in f if line.strip()]
+PREPROCESSING_SCHEMA = joblib.load(preprocessing_file)
+with open(manifest_file, encoding="utf-8") as f:
+    BUNDLE_MANIFEST = json.load(f)
 try:
-    # Load the trained XGBoost model in MLflow pyfunc format
-    # This ensures compatibility regardless of the underlying ML library
-    model = mlflow.pyfunc.load_model(MODEL_DIR)
-    print(f"✅ Model loaded successfully from {MODEL_DIR}")
-except Exception as e:
-    print(f"❌ Failed to load model from {MODEL_DIR}: {e}")
-    # Fallback for local development (OPTIONAL)
-    try:
-        # Try loading from local MLflow tracking
-        import glob
-        local_model_paths = glob.glob("./mlruns/*/*/artifacts/model")
-        if local_model_paths:
-            latest_model = max(local_model_paths, key=os.path.getmtime)
-            model = mlflow.pyfunc.load_model(latest_model)
-            MODEL_DIR = latest_model
-            print(f"✅ Fallback: Loaded model from {latest_model}")
-        else:
-            raise Exception("No model found in local mlruns")
-    except Exception as fallback_error:
-        raise Exception(f"Failed to load model: {e}. Fallback failed: {fallback_error}")
+    DECISION_THRESHOLD = float(BUNDLE_MANIFEST["decision_threshold"])
+except (KeyError, TypeError, ValueError) as error:
+    raise ValueError("Bundle manifest must contain a numeric decision_threshold") from error
+if not math.isfinite(DECISION_THRESHOLD) or not 0.0 <= DECISION_THRESHOLD <= 1.0:
+    raise ValueError("Bundle decision_threshold must be between 0 and 1")
+if PREPROCESSING_SCHEMA.get("feature_columns") != FEATURE_COLS:
+    raise ValueError("Feature columns do not match the preprocessing schema in the model bundle")
+if "categorical_categories" not in PREPROCESSING_SCHEMA:
+    raise ValueError(
+        "Model bundle has no fitted category mappings. "
+        "Package a model trained with the current scripts/run_pipeline.py."
+    )
 
-# === FEATURE SCHEMA LOADING ===
-# CRITICAL: Load the exact feature column order used during training
-# This ensures the model receives features in the expected order
-try:
-    feature_file = os.path.join(MODEL_DIR, "feature_columns.txt")
-    with open(feature_file) as f:
-        FEATURE_COLS = [ln.strip() for ln in f if ln.strip()]
-    print(f"✅ Loaded {len(FEATURE_COLS)} feature columns from training")
-except Exception as e:
-    raise Exception(f"Failed to load feature columns: {e}")
-
-# === FEATURE TRANSFORMATION CONSTANTS ===
-# CRITICAL: These mappings must exactly match those used in training
-# Any changes here will cause train/serve skew and degrade model performance
-
-# Deterministic binary feature mappings (consistent with training)
-BINARY_MAP = {
-    "gender": {"Female": 0, "Male": 1},           # Demographics
-    "Partner": {"No": 0, "Yes": 1},               # Has partner
-    "Dependents": {"No": 0, "Yes": 1},            # Has dependents  
-    "PhoneService": {"No": 0, "Yes": 1},          # Phone service
-    "PaperlessBilling": {"No": 0, "Yes": 1},      # Billing preference
-}
-
-# Numeric columns that need type coercion
-NUMERIC_COLS = ["tenure", "MonthlyCharges", "TotalCharges"]
+# The exact sklearn model, preprocessing, and decision threshold come from one run.
+model = mlflow.sklearn.load_model(MODEL_DIR)
+print(f"✅ Model bundle loaded from {MODEL_DIR}")
 
 def _serve_transform(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -91,11 +85,10 @@ def _serve_transform(df: pd.DataFrame) -> pd.DataFrame:
     transformed exactly as they were during training to prevent train/serve skew.
     
     Transformation Pipeline:
-    1. Clean column names and handle data types
-    2. Apply deterministic binary encoding (using BINARY_MAP)
-    3. One-hot encode remaining categorical features  
-    4. Convert boolean columns to integers
-    5. Align features with training schema and order
+        1. Coerce numeric fields and clean column names
+        2. Apply fitted binary and categorical mappings
+        3. One-hot encode using training-time categories
+        4. Align features with training schema and order
     
     Args:
         df: Single-row DataFrame with raw customer data
@@ -106,55 +99,10 @@ def _serve_transform(df: pd.DataFrame) -> pd.DataFrame:
     IMPORTANT: Any changes to this function must be reflected in training
     feature engineering to maintain consistency.
     """
-    df = df.copy()
-    
-    # Clean column names (remove any whitespace)
-    df.columns = df.columns.str.strip()
-    
-    # === STEP 1: Numeric Type Coercion ===
-    # Ensure numeric columns are properly typed (handle string inputs)
-    for c in NUMERIC_COLS:
-        if c in df.columns:
-            # Convert to numeric, replacing invalid values with NaN
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-            # Fill NaN with 0 (same as training preprocessing)
-            df[c] = df[c].fillna(0)
-    
-    # === STEP 2: Binary Feature Encoding ===
-    # Apply deterministic mappings for binary features
-    # CRITICAL: Must use exact same mappings as training
-    for c, mapping in BINARY_MAP.items():
-        if c in df.columns:
-            df[c] = (
-                df[c]
-                .astype(str)                    # Convert to string
-                .str.strip()                    # Remove whitespace
-                .map(mapping)                   # Apply binary mapping
-                .astype("Int64")                # Handle NaN values
-                .fillna(0)                      # Fill unknown values with 0
-                .astype(int)                    # Final integer conversion
-            )
-    
-    # === STEP 3: One-Hot Encoding for Remaining Categorical Features ===
-    # Find remaining object/categorical columns (not in BINARY_MAP)
-    obj_cols = [c for c in df.select_dtypes(include=["object"]).columns]
-    if obj_cols:
-        # Apply one-hot encoding with drop_first=True (same as training)
-        # This prevents multicollinearity by dropping the first category
-        df = pd.get_dummies(df, columns=obj_cols, drop_first=True)
-    
-    # === STEP 4: Boolean to Integer Conversion ===
-    # Convert any boolean columns to integers (XGBoost compatibility)
-    bool_cols = df.select_dtypes(include=["bool"]).columns
-    if len(bool_cols) > 0:
-        df[bool_cols] = df[bool_cols].astype(int)
-    
-    # === STEP 5: Feature Alignment with Training Schema ===
-    # CRITICAL: Ensure features are in exact same order as training
-    # Missing features get filled with 0, extra features are dropped
-    df = df.reindex(columns=FEATURE_COLS, fill_value=0)
-    
-    return df
+    for column in ("tenure", "MonthlyCharges", "TotalCharges"):
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
+    return transform_features(df, PREPROCESSING_SCHEMA)
 
 def predict(input_dict: dict) -> str:
     """
@@ -197,27 +145,17 @@ def predict(input_dict: dict) -> str:
     df_enc = _serve_transform(df)
     
     # === STEP 3: Generate Model Prediction ===
-    # Call the loaded MLflow model for inference
-    # The model returns predictions in various formats depending on the ML library
+    # Apply the threshold selected and logged with this exact model run.
     try:
-        preds = model.predict(df_enc)
-        
-        # Normalize prediction output to consistent format
-        if hasattr(preds, "tolist"):
-            preds = preds.tolist()  # Convert numpy array to list
-            
-        # Extract single prediction value (for single-row input)
-        if isinstance(preds, (list, tuple)) and len(preds) == 1:
-            result = preds[0]
-        else:
-            result = preds
+        probability = float(model.predict_proba(df_enc)[0][1])
+        result = churn_class_from_probability(probability, DECISION_THRESHOLD)
             
     except Exception as e:
         raise Exception(f"Model prediction failed: {e}")
     
     # === STEP 4: Convert to Business-Friendly Output ===
     # Convert binary prediction (0/1) to actionable business language
-    if result == 1:
+    if result:
         return "Likely to churn"      # High risk - needs intervention
     else:
         return "Not likely to churn"  # Low risk - maintain normal service

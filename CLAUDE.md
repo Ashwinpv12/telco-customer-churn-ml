@@ -15,14 +15,8 @@ python scripts/prepare_processed_data.py
 
 ### Testing
 ```bash
-# Test data processing and feature engineering
-python scripts/test_pipeline_phase1_data_features.py
-
-# Test model training and evaluation
-python scripts/test_pipeline_phase2_modeling.py
-
-# Test FastAPI endpoints
-python scripts/test_fastapi.py
+# Run the automated regression suite
+python -m pytest tests -q
 ```
 
 ### Local Development
@@ -30,7 +24,7 @@ python scripts/test_fastapi.py
 # Run the FastAPI + Gradio application locally
 python -m uvicorn src.app.main:app --host 0.0.0.0 --port 8000
 
-# Alternative app entry point
+# Legacy compatibility alias; main.py is the canonical implementation
 python -m uvicorn src.app.app:app --host 0.0.0.0 --port 8000
 ```
 
@@ -59,7 +53,7 @@ This project implements a complete MLOps pipeline with two distinct phases:
 - **Tracking URI**: File-based at `{project_root}/mlruns`
 - **Logged Artifacts**: `model/`, `feature_columns.txt`, `preprocessing.pkl`
 - **Tracked Metrics**: precision, recall, f1, roc_auc, train_time, pred_time, data_quality_pass
-- **Parameters**: model type, threshold (default 0.35), test_size (default 0.2)
+- **Parameters**: model hyperparameters, threshold, split seed, dataset SHA-256, row/column counts, and Python/library versions
 
 ### Feature Engineering Consistency
 Critical pattern: Training and serving must use identical feature transformations.
@@ -70,12 +64,12 @@ Critical pattern: Training and serving must use identical feature transformation
 - Boolean columns → integers
 
 **Serving** (`src/serving/inference.py`):
-- Uses fixed `BINARY_MAP` dictionary for consistent binary encoding
-- Applies `pd.get_dummies()` with same parameters as training
-- Feature alignment via `FEATURE_COLS` from training artifacts
+- Loads fitted binary/category mappings from the selected model's `preprocessing.pkl`
+- Applies the training-time category schema to individual requests
+- Aligns features to the paired `feature_columns.txt` in the same model bundle
 
 ### Model Loading and Serving
-- **Container Path**: Model loaded from `/app/model` (MLflow pyfunc format)
+- **Container Path**: Model loaded from `/app/model` (MLflow sklearn format)
 - **Feature Order**: Enforced using `feature_columns.txt` from training
 - **Prediction Format**: Returns "Likely to churn" or "Not likely to churn" strings
 
@@ -92,8 +86,8 @@ Critical pattern: Training and serving must use identical feature transformation
 - **Serving**: uvicorn with FastAPI app on port 8000
 
 ### CI/CD Pipeline
-- **Trigger**: Push to main branch
-- **Actions**: Build Docker image → Push to Docker Hub (`anasriad8/telco-fastapi:latest`)
+- **Trigger**: Pull requests and pushes to main
+- **Actions**: Run pytest; on main, build and smoke-test Docker image before pushing to Docker Hub
 - **Requirements**: `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets
 - **Deployment**: Manual ECS service update (AWS Fargate + ALB)
 
@@ -111,13 +105,13 @@ Optimized hyperparameters are hardcoded in `scripts/run_pipeline.py:100-110`:
 
 ### File System Layout
 - `data/raw/` - Original datasets
-- `data/processed/` - Cleaned datasets
+- `data/processed/` - Canonical cleaned CSVs (categoricals remain unencoded)
 - `mlruns/` - MLflow experiment tracking database
-- `artifacts/` - Shared preprocessing artifacts (`feature_columns.json`, `preprocessing.pkl`)
-- `src/serving/model/` - Local MLflow run copies for development
+- `src/serving/model/production/` - Promoted model, feature schema, preprocessing mappings, and threshold
+- `artifacts/` - Legacy/generated metadata; not used for serving model selection
 
 ### Development Notes
-- No formal test suite exists; use manual test scripts in `scripts/test_*.py`
+- Automated regression tests live in `tests/` and run in CI
 - MLflow UI can be accessed with: `mlflow ui --backend-store-uri file:./mlruns`
 - The project uses file-based MLflow tracking (not a tracking server)
 - Model serving expects exact feature column order from training time

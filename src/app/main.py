@@ -11,7 +11,7 @@ Architecture:
 - Pydantic: Data validation and automatic API documentation
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import gradio as gr
 from src.serving.inference import predict  # Core ML inference logic
@@ -43,6 +43,7 @@ class CustomerData(BaseModel):
     """
     # Demographics
     gender: str                # "Male" or "Female"
+    SeniorCitizen: int         # 0 or 1
     Partner: str               # "Yes" or "No" - has partner
     Dependents: str            # "Yes" or "No" - has dependents
     
@@ -82,15 +83,15 @@ def get_prediction(data: CustomerData):
     
     Expected Response:
     - {"prediction": "Likely to churn"} or {"prediction": "Not likely to churn"}
-    - {"error": "error_message"} if prediction fails
+    - HTTP 500 with {"detail": "error_message"} if prediction fails
     """
     try:
         # Convert Pydantic model to dict and call inference pipeline
-        result = predict(data.dict())
+        result = predict(data.model_dump())
         return {"prediction": result}
     except Exception as e:
         # Return error details for debugging (consider logging in production)
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # =================================================== # 
@@ -186,16 +187,6 @@ demo = gr.Interface(
     💡 **Tip**: Month-to-month contracts with fiber optic internet and electronic check payments 
     tend to have higher churn rates.
     """,
-    examples=[
-        # High churn risk example
-        ["Female", "No", "No", "Yes", "No", "Fiber optic", "No", "No", "No", 
-         "No", "Yes", "Yes", "Month-to-month", "Yes", "Electronic check", 
-         1, 85.0, 85.0],
-        # Low churn risk example  
-        ["Male", "Yes", "Yes", "Yes", "Yes", "DSL", "Yes", "Yes", "Yes",
-         "Yes", "No", "No", "Two year", "No", "Credit card (automatic)",
-         60, 45.0, 2700.0]
-    ],
     theme=gr.themes.Soft()  # Professional appearance
 )
 

@@ -1,17 +1,17 @@
-# test_pipeline_phase1.py
-import os
+from pathlib import Path
+import sys
+
 import pandas as pd
 
-# Make sure Python can find your src package
-import sys
-sys.path.append(os.path.abspath("src"))
+project_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(project_root))
 
-from data.load_data import load_data
-from data.preprocess import preprocess_data
-from features.build_features import build_features
+from src.data.load_data import load_data
+from src.data.preprocess import preprocess_data
+from src.features.build_features import build_features
 
 # === CONFIG ===
-DATA_PATH = "/Users/riadanas/Desktop/Telco Customer Churn MLE/data/raw/Telco-Customer-Churn.csv"  # adjust to your file path
+DATA_PATH = project_root / "data" / "raw" / "Telco-Customer-Churn.csv"
 TARGET_COL = "Churn"
 
 def main():

@@ -3,19 +3,30 @@
 Runs sequentially: load → validate → preprocess → feature engineering
 """
 
-import os
-import sys
-import time
 import argparse
-import pandas as pd
+import hashlib
+import json
+import os
+import platform
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+import joblib
 import mlflow
 import mlflow.sklearn
-from posthog import project_root
-from sklearn.model_selection import train_test_split
+import pandas as pd
+import sklearn
+import xgboost
 from sklearn.metrics import (
-    classification_report, precision_score, recall_score,
-    f1_score, roc_auc_score
+    classification_report,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
 )
+from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
 # === Fix import path for local modules ===
@@ -24,9 +35,11 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # Local modules - Core pipeline components
 from src.data.load_data import load_data                    # Data loading with error handling
-from src.data.preprocess import preprocess_data            # Basic data cleaning
-from src.features.build_features import build_features     # Feature engineering (CRITICAL for model performance)
+from src.data.preprocess import preprocess_data, save_processed_data  # Canonical data cleaning/output
+from src.features.build_features import fit_feature_encoder  # Fit preprocessing mappings on training data
 from src.utils.validate_data import validate_telco_data    # Data quality validation
+
+RANDOM_STATE = 42
 
 def main(args):
     """
@@ -37,7 +50,7 @@ def main(args):
     # === MLflow Setup - ESSENTIAL for experiment tracking ===
     # Configure MLflow to use local file-based tracking (not a tracking server)
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    mlruns_path = args.mlflow_uri or f"file://{project_root}/mlruns"  # Local file-based tracking
+    mlruns_path = args.mlflow_uri or Path(project_root, "mlruns").resolve().as_uri()  # Local file-based tracking
     mlflow.set_tracking_uri(mlruns_path)
     mlflow.set_experiment(args.experiment)  # Creates experiment if doesn't exist
 
@@ -51,8 +64,25 @@ def main(args):
 
         # === STAGE 1: Data Loading & Validation ===
         print("🔄 Loading data...")
-        df = load_data(args.input)  # Load raw CSV data with error handling
+        input_path = Path(args.input).resolve()
+        dataset_sha256 = hashlib.sha256(input_path.read_bytes()).hexdigest()
+        df = load_data(input_path)  # Load raw CSV data with error handling
         print(f"✅ Data loaded: {df.shape[0]} rows, {df.shape[1]} columns")
+        mlflow.log_params(
+            {
+                "target": args.target,
+                "data_filename": input_path.name,
+                "data_sha256": dataset_sha256,
+                "data_rows": int(df.shape[0]),
+                "data_columns": int(df.shape[1]),
+                "split_random_state": RANDOM_STATE,
+                "python_version": platform.python_version(),
+                "mlflow_version": mlflow.__version__,
+                "pandas_version": pd.__version__,
+                "scikit_learn_version": sklearn.__version__,
+                "xgboost_version": xgboost.__version__,
+            }
+        )
 
         # === CRITICAL: Data Quality Validation ===
         # This step is ESSENTIAL for production ML - validates data quality before training
@@ -62,7 +92,6 @@ def main(args):
 
         if not is_valid:
             # Log validation failures for debugging
-            import json
             mlflow.log_text(json.dumps(failed, indent=2), artifact_file="failed_expectations.json")
             raise ValueError(f"❌ Data quality check failed. Issues: {failed}")
         else:
@@ -70,12 +99,12 @@ def main(args):
 
         # === STAGE 2: Data Preprocessing ===
         print("🔧 Preprocessing data...")
-        df = preprocess_data(df)  # Basic cleaning (handle missing values, fix data types)
+        df = preprocess_data(df, target_col=args.target)
 
         # Save processed dataset for reproducibility and debugging
-        processed_path = os.path.join(project_root, "data", "processed", "telco_churn_processed.csv")
-        os.makedirs(os.path.dirname(processed_path), exist_ok=True)
-        df.to_csv(processed_path, index=False)
+        processed_path = save_processed_data(
+            df, Path(project_root, "data", "processed", "telco_churn_processed.csv")
+        )
         print(f"✅ Processed dataset saved to {processed_path} | Shape: {df.shape}")
 
         # === STAGE 3: Feature Engineering - CRITICAL for Model Performance ===
@@ -85,37 +114,26 @@ def main(args):
             raise ValueError(f"Target column '{target}' not found in data")
         
         # Apply feature engineering transformations
-        df_enc = build_features(df, target_col=target)  # Binary encoding + one-hot encoding
+        df_enc, preprocessing_schema = fit_feature_encoder(df, target_col=target)
         
         # IMPORTANT: Convert boolean columns to integers for XGBoost compatibility
         for c in df_enc.select_dtypes(include=["bool"]).columns:
             df_enc[c] = df_enc[c].astype(int)
         print(f"✅ Feature engineering completed: {df_enc.shape[1]} features")
 
-        # === CRITICAL: Save Feature Metadata for Serving Consistency ===
-        # This ensures serving pipeline uses exact same features in exact same order
-        import json, joblib
-        artifacts_dir = os.path.join(project_root, "artifacts")
-        os.makedirs(artifacts_dir, exist_ok=True)
-
+        # === Log Feature Metadata for Serving Consistency ===
+        # This records the exact feature order alongside the fitted encoder.
         # Get feature columns (exclude target)
         feature_cols = list(df_enc.drop(columns=[target]).columns)
-        
-        # Save locally for development serving
-        with open(os.path.join(artifacts_dir, "feature_columns.json"), "w") as f:
-            json.dump(feature_cols, f)
-
         # Log to MLflow for production serving
         mlflow.log_text("\n".join(feature_cols), artifact_file="feature_columns.txt")
+        mlflow.log_param("feature_count", len(feature_cols))
 
-        # ESSENTIAL: Save preprocessing artifacts for serving pipeline
-        # These artifacts ensure training and serving use identical transformations
-        preprocessing_artifact = {
-            "feature_columns": feature_cols,  # Exact feature order
-            "target": target                  # Target column name
-        }
-        joblib.dump(preprocessing_artifact, os.path.join(artifacts_dir, "preprocessing.pkl"))
-        mlflow.log_artifact(os.path.join(artifacts_dir, "preprocessing.pkl"))
+        # Keep the fitted preprocessing schema inside this exact MLflow run.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            preprocessing_path = Path(temp_dir, "preprocessing.pkl")
+            joblib.dump(preprocessing_schema, preprocessing_path)
+            mlflow.log_artifact(str(preprocessing_path))
         print(f"✅ Saved {len(feature_cols)} feature columns for serving consistency")
 
         # === STAGE 4: Train/Test Split ===
@@ -128,7 +146,7 @@ def main(args):
             X, y, 
             test_size=args.test_size,    # Default: 20% for testing
             stratify=y,                  # Maintain class balance
-            random_state=42              # Reproducible splits
+            random_state=RANDOM_STATE     # Reproducible splits
         )
         print(f"✅ Train: {X_train.shape[0]} samples | Test: {X_test.shape[0]} samples")
 
@@ -143,24 +161,26 @@ def main(args):
         
         # IMPORTANT: These hyperparameters were optimized through hyperparameter tuning
         # In production, consider using hyperparameter optimization tools like Optuna
-        model = XGBClassifier(
+        model_params = {
             # Tree structure parameters
-            n_estimators=301,        # Number of trees (OPTIMIZED)
-            learning_rate=0.034,     # Step size shrinkage (OPTIMIZED)  
-            max_depth=7,            # Maximum tree depth (OPTIMIZED)
+            "n_estimators": 301,        # Number of trees (OPTIMIZED)
+            "learning_rate": 0.034,     # Step size shrinkage (OPTIMIZED)
+            "max_depth": 7,             # Maximum tree depth (OPTIMIZED)
             
             # Regularization parameters
-            subsample=0.95,         # Sample ratio of training instances
-            colsample_bytree=0.98,  # Sample ratio of features for each tree
+            "subsample": 0.95,          # Sample ratio of training instances
+            "colsample_bytree": 0.98,   # Sample ratio of features for each tree
             
             # Performance parameters
-            n_jobs=-1,              # Use all CPU cores
-            random_state=42,        # Reproducible results
-            eval_metric="logloss",  # Evaluation metric
+            "n_jobs": -1,               # Use all CPU cores
+            "random_state": RANDOM_STATE,
+            "eval_metric": "logloss",
             
             # ESSENTIAL: Handle class imbalance
-            scale_pos_weight=scale_pos_weight  # Weight for positive class (churners)
-        )
+            "scale_pos_weight": float(scale_pos_weight),
+        }
+        mlflow.log_params({f"model_{key}": value for key, value in model_params.items()})
+        model = XGBClassifier(**model_params)
 
         # === Train Model and Track Training Time ===
         t0 = time.time()
@@ -231,12 +251,3 @@ if __name__ == "__main__":
 
     args = p.parse_args()
     main(args)
-
-"""
-# Use this below to run the pipeline:
-
-python scripts/run_pipeline.py \                                            
-    --input data/raw/Telco-Customer-Churn.csv \
-    --target Churn
-
-"""

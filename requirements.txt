@@ -29,13 +29,15 @@ Flask==3.1.1
 fonttools==4.59.0
 gitdb==4.0.12
 GitPython==3.1.45
-gradio
+gradio==3.36.1
+gradio-client==0.2.10
 graphene==3.4.3
 graphql-core==3.2.6
 graphql-relay==3.2.0
-great_expectations==1.5.8
+great_expectations==0.18.21
 gunicorn==22.0.0
 h11==0.16.0
+httpx==0.28.1
 idna==3.10
 importlib_metadata==7.2.1
 iniconfig==2.1.0
@@ -95,7 +97,7 @@ querystring-parser==1.2.4
 referencing==0.36.2
 requests==2.32.4
 rpds-py==0.27.0
-ruamel.yaml==0.18.14
+ruamel.yaml==0.17.40
 ruamel.yaml.clib==0.2.12
 scikit-learn==1.5.2
 scipy==1.16.1

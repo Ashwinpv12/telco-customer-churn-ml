@@ -1,7 +1,13 @@
 # venvs
 .venv/
+.venv312/
 venv/
 env/
+
+# Runtime and UI-generated data
+.gradio/
+flagged/
+*.log
 
 # OS cruft
 .DS_Store
@@ -16,6 +22,11 @@ mlruns/
 artifacts/
 data/raw/
 data/processed/
+
+# Notebook scratch files and duplicate local dataset downloads
+/notebooks/*.csv
+/notebooks/Untitled-*.txt
+/notebooks/Python 3.12 (Telco Churn .venv312)
 
 # BUT keep our bundled serving model in the repo
 !src/serving/model/

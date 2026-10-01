@@ -1,33 +1,43 @@
-import os, sys
+import argparse
+import sys
+from pathlib import Path
+
 import pandas as pd
 
-# make src importable
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.preprocess import preprocess_data
-from src.features.build_features import build_features
+from src.data.load_data import load_data
+from src.data.preprocess import preprocess_data, save_processed_data
 
-RAW = "data/raw/Telco-Customer-Churn.csv"
-OUT = "data/processed/telco_churn_processed.csv"
 
-# 1) load raw
-df = pd.read_csv(RAW)
+def prepare_processed_data(
+    input_path: str | Path, output_path: str | Path, target_col: str = "Churn"
+) -> pd.DataFrame:
+    """Load and clean data using the same stages and output format as training."""
+    cleaned = preprocess_data(load_data(input_path), target_col=target_col)
+    save_processed_data(cleaned, output_path)
+    return cleaned
 
-# 2) preprocess (drops id, fixes TotalCharges, etc.)
-df = preprocess_data(df, target_col="Churn")
 
-# 3) ensure target is 0/1 only if still object
-if "Churn" in df.columns and df["Churn"].dtype == "object":
-    df["Churn"] = df["Churn"].str.strip().map({"No": 0, "Yes": 1}).astype("Int64")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Create the canonical cleaned Telco CSV")
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=PROJECT_ROOT / "data" / "raw" / "Telco-Customer-Churn.csv",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=PROJECT_ROOT / "data" / "processed" / "telco_churn_processed.csv",
+    )
+    args = parser.parse_args()
 
-# sanity checks
-assert df["Churn"].isna().sum() == 0, "Churn has NaNs after preprocess"
-assert set(df["Churn"].unique()) <= {0, 1}, "Churn not 0/1 after preprocess"
+    cleaned = prepare_processed_data(args.input, args.output)
+    output_path = args.output.resolve()
+    print(f"✅ Cleaned dataset saved to {output_path} | Shape: {cleaned.shape}")
 
-# 4) features
-df_processed = build_features(df, target_col="Churn")
 
-# 5) save
-os.makedirs(os.path.dirname(OUT), exist_ok=True)
-df_processed.to_csv(OUT, index=False)
-print(f"✅ Processed dataset saved to {OUT} | Shape: {df_processed.shape}")
+if __name__ == "__main__":
+    main()

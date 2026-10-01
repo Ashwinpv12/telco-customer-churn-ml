@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 
 
@@ -37,3 +39,11 @@ def preprocess_data(df: pd.DataFrame, target_col: str = "Churn") -> pd.DataFrame
     df[num_cols] = df[num_cols].fillna(0)
 
     return df
+
+
+def save_processed_data(df: pd.DataFrame, output_path: str | Path) -> Path:
+    """Save the canonical cleaned, pre-feature-engineering dataset."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    return path

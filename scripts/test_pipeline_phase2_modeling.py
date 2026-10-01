@@ -1,11 +1,26 @@
+from pathlib import Path
+import sys
+
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 import optuna
 
+project_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(project_root))
+
+from src.data.preprocess import preprocess_data
+from src.features.build_features import build_features
+
 print("=== Phase 2: Modeling with XGBoost ===")
 
-df = pd.read_csv("data/processed/telco_churn_processed.csv")
+raw_data_path = project_root / "data" / "raw" / "Telco-Customer-Churn.csv"
+df = pd.read_csv(raw_data_path)
+df = preprocess_data(df, target_col="Churn")
+df = build_features(df, target_col="Churn")
+
+for column in df.select_dtypes(include=["bool"]).columns:
+    df[column] = df[column].astype(int)
 
 # target must be numeric 0/1
 if df["Churn"].dtype == "object":
